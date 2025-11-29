@@ -7,9 +7,9 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # --- CONFIGURAZIONE ---
 TOKEN = os.getenv("BOT_TOKEN")
-CONTACT_USERNAME = "tuo_username_qui" 
+CONTACT_USERNAME = "CHEFTONY_OG" 
 
-# IL TUO CHAT ID (Lo trovi nei log di Render all'avvio)
+# IL TUO CHAT ID
 ADMIN_CHAT_ID = 123456789 
 
 # I TUOI WALLET
@@ -48,40 +48,26 @@ def run_fake_server():
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     server.serve_forever()
 
-# --- FUNZIONE CAMBIO (API COINBASE - GRATIS E STABILE) ---
+# --- FUNZIONE CAMBIO (API COINBASE) ---
 def get_crypto_price(crypto_symbol, fiat_amount):
     try:
-        # Coinbase API Pubblica: BTC-EUR, LTC-EUR, USDC-EUR
         pair = f"{crypto_symbol}-EUR"
         url = f"https://api.coinbase.com/v2/prices/{pair}/spot"
-        
         response = requests.get(url).json()
-        
-        # Coinbase risponde con: {'data': {'amount': '1234.56', 'currency': 'EUR'}}
         price_one_coin = float(response['data']['amount'])
-        
-        # Calcolo finale
-        crypto_amount = fiat_amount / price_one_coin
-        return round(crypto_amount, 6) # 6 decimali
-        
+        return round(fiat_amount / price_one_coin, 6)
     except Exception as e:
         print(f"ERRORE API COINBASE: {e}")
-        # FALLBACK DI EMERGENZA SU BINANCE (Anche questa gratis)
         try:
             print("Tentativo con Binance...")
             pair_binance = f"{crypto_symbol}EUR" 
             if crypto_symbol == "USDC": pair_binance = "EURUSDC"
-            
             url_bin = f"https://api.binance.com/api/v3/ticker/price?symbol={pair_binance}"
             res_bin = requests.get(url_bin).json()
             price = float(res_bin['price'])
-            
-            if crypto_symbol == "USDC": 
-                return round(fiat_amount * price, 6)
-            
+            if crypto_symbol == "USDC": return round(fiat_amount * price, 6)
             return round(fiat_amount / price, 6)
-        except Exception as e2:
-            print(f"ERRORE ANCHE SU BINANCE: {e2}")
+        except:
             return None
 
 # --- LOGICA BOT ---
@@ -134,16 +120,11 @@ async def manage_quantity_buttons(update: Update, context: ContextTypes.DEFAULT_
     action = parts[1]
     prod_id = f"{parts[2]}_{parts[3]}"
     current_qty = int(parts[4])
+    new_qty = current_qty + 5 if action == "inc" else current_qty - 5
     
-    new_qty = current_qty
-    step = 5
-
-    if action == "inc": new_qty += step
-    elif action == "dec":
-        if current_qty > step: new_qty -= step
-        else:
-            await query.answer(f"Minimo {step}!")
-            return
+    if new_qty < 5:
+        await query.answer("Minimo 5!")
+        return
 
     await update_quantity_view(query, prod_id, new_qty)
     await query.answer()
@@ -206,7 +187,7 @@ async def show_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query: await query.answer()
     
-    context.user_data['awaiting_qty_prod'] = None # Reset input manuale se si cambia menu
+    context.user_data['awaiting_qty_prod'] = None 
 
     cart = context.user_data.get('cart', {})
     if not cart:
@@ -307,6 +288,9 @@ async def process_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     wallet = WALLETS.get(crypto, "Chiedere in chat")
     context.user_data['pending_order'] = {"crypto": crypto, "amount": amount, "wallet": wallet, "eur": eur}
     context.user_data['awaiting_txid'] = True
+    
+    # Recuperiamo il codice spedizione per usarlo nel tasto indietro
+    ship_code = context.user_data.get('selected_shipping')
 
     text = (
         f"💳 **PAGAMENTO {crypto}**\n\n"
@@ -314,28 +298,30 @@ async def process_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Address:\n`{wallet}`\n\n"
         "⬇️ **APPENA INVIATO:**\nCopia il **TXID** e incollalo qui in chat."
     )
-    keyboard = [[InlineKeyboardButton("❌ Annulla", callback_data="main_menu")]]
+    
+    # MODIFICA RICHIESTA: TASTO INDIETRO AGGIUNTO
+    keyboard = [
+        [InlineKeyboardButton("🔙 Cambia Metodo di Pagamento", callback_data=f"ship_{ship_code}")],
+        [InlineKeyboardButton("❌ Annulla Ordine", callback_data="main_menu")]
+    ]
+    
     await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-# --- INPUT TESTO (MANUALE + TXID) ---
+# --- INPUT TESTO ---
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     
-    # CASO 1: INPUT QUANTITÀ MANUALE
     if context.user_data.get('awaiting_qty_prod'):
         prod_id = context.user_data['awaiting_qty_prod']
         try:
             qty = int(user_text)
             if qty <= 0: raise ValueError
-            
             text, markup = add_to_cart_logic(context, prod_id, qty)
             await update.message.reply_text(text, reply_markup=markup, parse_mode="Markdown")
-            
         except ValueError:
             await update.message.reply_text("❌ Numero non valido. Scrivi un numero intero (es: 10).")
         return
 
-    # CASO 2: INPUT TXID
     if context.user_data.get('awaiting_txid'):
         txid = user_text
         user = update.message.from_user
