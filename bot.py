@@ -1,9 +1,9 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
-import asyncio
 import os
+# Non serve più importare asyncio esplicitamente per il main
 
-TOKEN = os.getenv("BOT_TOKEN")  # Render userà la variabile d'ambiente
+TOKEN = os.getenv("BOT_TOKEN")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -34,13 +34,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "aiuto":
         await query.edit_message_text("❓ In cosa posso aiutarti?")
 
-async def main():
+# NOTA: Ho rimosso 'async' qui sotto
+def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
 
     print("Bot avviato su Render ✔️")
-    await app.run_polling()
+    
+    # NOTA: Ho rimosso 'await' qui sotto
+    app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # NOTA: Ho rimosso asyncio.run(...)
+    main()
