@@ -6,7 +6,7 @@ import requests
 import logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# --- ATTIVIAMO IL LOGGING PER VEDERE GLI ERRORI ---
+# --- ENABLE LOGGING FOR DEBUGGING ---
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -14,7 +14,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==========================================
-# ⚙️ CONFIGURAZIONE
+# ⚙️ CONFIGURATION
 # ==========================================
 
 TOKEN = os.getenv("BOT_TOKEN") 
@@ -28,7 +28,7 @@ WALLETS = {
 }
 
 # ==========================================
-# 📦 DATABASE PRODOTTI
+# 📦 PRODUCTS DATABASE
 # ==========================================
 PRODUCTS = {
     "prod_1": {"name": "🍝 Spaghetti Amnesia", "price": 50, "unit": "g"},
@@ -37,7 +37,7 @@ PRODUCTS = {
 }
 
 # ==========================================
-# 🚚 SPEDIZIONI (USIAMO CHIAVI SEMPLICI)
+# 🚚 SHIPPING METHODS
 # ==========================================
 SHIPPING_METHODS = {
     "1": {"name": "🇮🇹 Poste Italiane", "price": 10},
@@ -46,7 +46,7 @@ SHIPPING_METHODS = {
 }
 
 # ==========================================
-# 🌐 SERVER FAKE
+# 🌐 FAKE SERVER (For Render)
 # ==========================================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -58,7 +58,7 @@ def run_fake_server():
     server.serve_forever()
 
 # ==========================================
-# 🔧 FUNZIONI UTILI
+# 🔧 UTILITY FUNCTIONS
 # ==========================================
 
 def get_crypto_price(crypto_symbol, fiat_amount):
@@ -99,7 +99,7 @@ def get_order_recap(context):
 def verify_tx_on_blockchain(crypto, txid, expected_amount, my_wallet_address):
     txid = txid.strip()
     if len(txid) < 10: return False, "❌ TXID troppo corto."
-    # (Logica verifica invariata per brevità, funziona)
+    # Simulation for functionality
     return True, "⚠️ Verifica simulata (modalità debug)."
 
 async def cleanup_messages(context, chat_id):
@@ -111,7 +111,7 @@ async def cleanup_messages(context, chat_id):
             context.user_data[key] = None
 
 # ==========================================
-# 🤖 LOGICA BOT
+# 🤖 BOT LOGIC
 # ==========================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -148,7 +148,7 @@ async def policy_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer()
     await query.edit_message_text("📣 Policy...", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="main_menu")]]))
 
-# --- QUANTITA ---
+# --- QUANTITY ---
 async def init_quantity_selector(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer()
     prod_id = query.data.replace("sel_", "")
@@ -192,7 +192,10 @@ async def show_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer()
     context.user_data['selected_shipping'] = None
     cart = context.user_data.get('cart', {})
-    if not cart: await query.edit_message_text("Carrello vuoto.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Shop", callback_data="listings")] 없습니다])); return
+    if not cart: 
+        # FIX: Removed the stray Korean characters here
+        await query.edit_message_text("Carrello vuoto.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Shop", callback_data="listings")]]), parse_mode="Markdown")
+        return
     
     total = sum([PRODUCTS[pid]['price'] * q for pid, q in cart.items() if pid in PRODUCTS])
     context.user_data['cart_total_products'] = total
@@ -203,7 +206,7 @@ async def show_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def empty_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['cart'] = {}; await show_cart(update, context)
 
-# --- DEBUGGING SPEDIZIONE ---
+# --- SHIPPING DEBUGGING ---
 
 async def choose_shipping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print("DEBUG: Funzione choose_shipping chiamata")
@@ -211,7 +214,7 @@ async def choose_shipping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     keyboard = []
-    # Usiamo prefisso "S_" molto breve per evitare errori
+    # Prefix "S_" 
     for code, method in SHIPPING_METHODS.items():
         keyboard.append([InlineKeyboardButton(f"{method['name']} (+{method['price']}€)", callback_data=f"S_{code}")])
     
@@ -221,8 +224,6 @@ async def choose_shipping(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_shipping_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"DEBUG: Click spedizione ricevuto! Data: {update.callback_query.data}")
     query = update.callback_query
-    
-    # 1. Forza la risposta al server di telegram (per fermare la rotellina)
     await query.answer()
     
     ship_code = query.data.replace("S_", "")
@@ -242,7 +243,7 @@ async def handle_shipping_selection(update: Update, context: ContextTypes.DEFAUL
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Indietro", callback_data="choose_shipping")]], parse_mode="Markdown")
     )
 
-# --- PAGAMENTO ---
+# --- PAYMENT ---
 
 async def show_payment_methods(update: Update, context: ContextTypes.DEFAULT_TYPE, from_text=False):
     await cleanup_messages(context, update.effective_chat.id)
@@ -289,7 +290,7 @@ async def copy_address_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data['warning_msg_id'] = warn_msg.message_id
     await query.answer("Copiato!")
 
-# --- ROUTER CON LOG ---
+# --- ROUTER WITH LOGS ---
 
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
@@ -316,17 +317,17 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if step == 'txid_input':
-        # Logica TXID semplificata per debug
+        # Simulated TXID logic
         await update.message.reply_text("✅ Ordine ricevuto (Simulato)!")
         context.user_data['step'] = None
         context.user_data['cart'] = {}
 
 async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = update.callback_query.data
-    print(f"DEBUG: Callback ricevuta: {data}") # VEDIAMO COSA ARRIVA
+    print(f"DEBUG: Callback ricevuta: {data}") 
     
     try:
-        if data.startswith("S_"): # NUOVO PREFISSO CORTO
+        if data.startswith("S_"): 
             await handle_shipping_selection(update, context)
             return
 
@@ -335,14 +336,11 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "show_cart": await show_cart(update, context)
         elif data == "empty_cart": await empty_cart(update, context)
         elif data == "choose_shipping": await choose_shipping(update, context)
-        
         elif data == "to_pay_methods": await show_payment_methods(update, context, from_text=False)
-        
         elif data.startswith("sel_"): await init_quantity_selector(update, context)
         elif data.startswith("qty_"): await manage_quantity_buttons(update, context)
         elif data.startswith("type_qty_"): await ask_manual_quantity(update, context)
         elif data.startswith("add_"): await add_to_cart_handler(update, context)
-        
         elif data.startswith("pay_"): await process_payment(update, context)
         elif data.startswith("copy_"): await copy_address_handler(update, context)
         elif data == "noop": await update.callback_query.answer()
