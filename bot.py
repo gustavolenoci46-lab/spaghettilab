@@ -278,11 +278,7 @@ async def execute_add_to_cart(update, context, prod_id, qty):
     keyboard = [[InlineKeyboardButton("🛍 Continua Shopping", callback_data="listings")], [InlineKeyboardButton("🛒 Vai al Carrello", callback_data="show_cart")]]
     
     if hasattr(update, 'callback_query') and update.callback_query:
-        # ANTI-CRASH: Se clicchi aggiungi 2 volte di fila velocemente
-        try:
-            await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-        except error.BadRequest:
-            pass
+        await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     else:
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
@@ -290,7 +286,6 @@ async def show_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer()
     cart = context.user_data.get('cart', {})
     
-    # RESETTATO: Pulisce la spedizione quando entri nel carrello
     context.user_data['selected_shipping'] = None 
     
     if not cart: 
@@ -312,28 +307,28 @@ async def empty_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['cart'] = {}
     await show_cart(update, context)
 
-# --- SPEDIZIONE (FIX IMPORTANTE QUI) ---
+# --- SPEDIZIONE (FIXED) ---
 
 async def choose_shipping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    context.user_data['selected_shipping'] = None # Sicurezza extra
+    context.user_data['selected_shipping'] = None 
     
     keyboard = []
-    # Uso 'btn_ship_' per evitare conflitti con altre logiche
+    # USO IL PREFISSO 'CMD_SHIP_' PER EVITARE CONFLITTI
     for code, method in SHIPPING_METHODS.items():
-        keyboard.append([InlineKeyboardButton(f"{method['name']} (+{method['price']}€)", callback_data=f"btn_ship_{code}")])
+        keyboard.append([InlineKeyboardButton(f"{method['name']} (+{method['price']}€)", callback_data=f"CMD_SHIP_{code}")])
     
     keyboard.append([InlineKeyboardButton("🔙 Indietro", callback_data="show_cart")])
     await query.edit_message_text("🚚 **Scegli Spedizione:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def handle_shipping_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Gestisce il click sulla spedizione e chiede l'indirizzo"""
+    print("Click spedizione ricevuto!") # DEBUG LOG
     query = update.callback_query
     await query.answer()
     
-    # Prende il codice dopo 'btn_ship_'
-    ship_code = query.data.replace("btn_ship_", "")
+    # Rimuovi il prefisso
+    ship_code = query.data.replace("CMD_SHIP_", "")
     
     if ship_code not in SHIPPING_METHODS:
         await query.edit_message_text("⚠️ Errore. Riprova.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Indietro", callback_data="choose_shipping")]]))
@@ -353,10 +348,11 @@ async def show_payment_methods(update: Update, context: ContextTypes.DEFAULT_TYP
     await cleanup_messages(context, update.effective_chat.id)
 
     ship_code = context.user_data.get('selected_shipping')
-    
-    # Se per qualche motivo manca la spedizione, rimanda indietro
     if not ship_code or ship_code not in SHIPPING_METHODS:
-        await choose_shipping(update, context)
+        if not from_text:
+            await choose_shipping(update, context)
+        else:
+            await update.message.reply_text("⚠️ Errore spedizione. Ricomincia dal carrello.")
         return
 
     total = context.user_data.get('cart_total_products', 0) + SHIPPING_METHODS[ship_code]['price']
@@ -376,7 +372,7 @@ async def show_payment_methods(update: Update, context: ContextTypes.DEFAULT_TYP
         [InlineKeyboardButton("🟠 Bitcoin (BTC)", callback_data="pay_BTC")],
         [InlineKeyboardButton("🔵 Litecoin (LTC)", callback_data="pay_LTC")],
         [InlineKeyboardButton("🟢 USDC (ERC20/TRC20)", callback_data="pay_USDC")],
-        [InlineKeyboardButton("✏️ Cambia Indirizzo", callback_data=f"btn_ship_{ship_code}")], # Usa lo stesso callback della selezione
+        [InlineKeyboardButton("✏️ Cambia Indirizzo", callback_data=f"CMD_SHIP_{ship_code}")], 
         [InlineKeyboardButton("❌ Annulla Ordine", callback_data="main_menu")]
     ]
     
@@ -430,7 +426,7 @@ async def copy_address_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     
     await query.answer("Copiato!")
 
-# --- ROUTER GENERALE ---
+# --- ROUTER ---
 
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
@@ -484,20 +480,24 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = update.callback_query.data
     
-    # Pulizia generica messaggi
+    # Pulizia generica
     if data in ["main_menu", "to_pay_methods", "show_cart", "listings"]: 
         await cleanup_messages(context, update.effective_chat.id)
     
     try:
+        # CONTROLLO PRIORITARIO PER LA SPEDIZIONE
+        # Questo if deve stare PRIMA di startswith("ship_") o altro
+        if data.startswith("CMD_SHIP_"):
+            await handle_shipping_selection(update, context)
+            return
+
         if data == "main_menu": await start(update, context)
         elif data == "listings": await listings(update, context)
         elif data == "policy": await policy_page(update, context)
         elif data == "show_cart": await show_cart(update, context)
         elif data == "empty_cart": await empty_cart(update, context)
         
-        # Logica Spedizione Rinominata 'btn_ship_'
         elif data == "choose_shipping": await choose_shipping(update, context)
-        elif data.startswith("btn_ship_"): await handle_shipping_selection(update, context)
         
         elif data == "to_pay_methods": await show_payment_methods(update, context, from_text=False)
         
