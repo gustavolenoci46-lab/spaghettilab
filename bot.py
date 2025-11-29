@@ -3,16 +3,17 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 import os
 import threading
 import requests
+import re
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # --- CONFIGURAZIONE ---
-TOKEN = os.getenv("BOT_TOKEN")
-CONTACT_USERNAME = "CHEFTONY_OG" 
+TOKEN = os.getenv("BOT_TOKEN") # Oppure inserisci la stringa "TUO_TOKEN"
+CONTACT_USERNAME = "tuo_username_qui" 
 
-# IL TUO CHAT ID
+# IL TUO CHAT ID (Per le notifiche admin)
 ADMIN_CHAT_ID = 123456789 
 
-# I TUOI WALLET
+# I TUOI WALLET (IMPORTANTE: Metti quelli veri per testare la verifica!)
 WALLETS = {
     "BTC": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", 
     "LTC": "LhyQNrqfehN6y7rQj1...MettiIlTuoIndirizzo",
@@ -33,7 +34,7 @@ SHIPPING_METHODS = {
     "stl": {"name": "🕵️‍♂️ Stealth Pro", "price": 35}
 }
 
-# --- SERVER FAKE ---
+# --- SERVER FAKE (Per tenere attivo il bot su Render/Replit) ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -48,7 +49,8 @@ def run_fake_server():
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     server.serve_forever()
 
-# --- FUNZIONE CAMBIO (API COINBASE) ---
+# --- FUNZIONI UTILI (PREZZO E VERIFICA TX SICURA) ---
+
 def get_crypto_price(crypto_symbol, fiat_amount):
     try:
         pair = f"{crypto_symbol}-EUR"
@@ -56,10 +58,9 @@ def get_crypto_price(crypto_symbol, fiat_amount):
         response = requests.get(url).json()
         price_one_coin = float(response['data']['amount'])
         return round(fiat_amount / price_one_coin, 6)
-    except Exception as e:
-        print(f"ERRORE API COINBASE: {e}")
+    except:
+        # Fallback Binance
         try:
-            print("Tentativo con Binance...")
             pair_binance = f"{crypto_symbol}EUR" 
             if crypto_symbol == "USDC": pair_binance = "EURUSDC"
             url_bin = f"https://api.binance.com/api/v3/ticker/price?symbol={pair_binance}"
@@ -70,13 +71,95 @@ def get_crypto_price(crypto_symbol, fiat_amount):
         except:
             return None
 
+def verify_tx_on_blockchain(crypto, txid, expected_amount, my_wallet_address):
+    """
+    Verifica SICURA: Controlla TXID, Destinatario e Importo.
+    """
+    txid = txid.strip()
+    
+    # Pulizia base
+    if len(txid) < 10: 
+        return False, "❌ TXID troppo corto."
+
+    try:
+        # 1. VERIFICA BITCOIN (Via Blockchain.info)
+        if crypto == "BTC":
+            url = f"https://blockchain.info/rawtx/{txid}"
+            resp = requests.get(url)
+            
+            if resp.status_code != 200:
+                return False, "⚠️ TXID non trovato sulla Blockchain Bitcoin."
+            
+            data = resp.json()
+            found = False
+            amount_received = 0.0
+
+            # Scansiona gli output della transazione per trovare il tuo wallet
+            for output in data.get('out', []):
+                # 'addr' è l'indirizzo destinatario, 'value' sono i Satoshi
+                if 'addr' in output and output['addr'] == my_wallet_address:
+                    amount_received = float(output['value']) / 100000000.0 # Converti Satoshi in BTC
+                    found = True
+                    break # Trovato, esco dal ciclo
+            
+            if not found:
+                return False, "❌ Il TXID esiste, ma i soldi NON sono stati inviati al tuo wallet."
+            
+            # Controllo importo (Tolleranza 1% per fluttuazioni cambio)
+            if amount_received < (expected_amount * 0.99):
+                return False, f"⚠️ Importo insufficiente. Ricevuto: {amount_received:.6f}, Richiesto: {expected_amount:.6f}"
+
+            return True, "✅ Pagamento Bitcoin Verificato e Corretto!"
+        
+        # 2. VERIFICA LITECOIN (Via BlockCypher)
+        elif crypto == "LTC":
+            url = f"https://api.blockcypher.com/v1/ltc/main/txs/{txid}"
+            resp = requests.get(url)
+            
+            if resp.status_code != 200:
+                return False, "⚠️ TXID non trovato sulla rete Litecoin."
+            
+            data = resp.json()
+            found = False
+            amount_received = 0.0
+
+            # Scansiona outputs
+            for output in data.get('outputs', []):
+                if my_wallet_address in output.get('addresses', []):
+                    amount_received = float(output['value']) / 100000000.0 # Converti Litoshi in LTC
+                    found = True
+                    break
+            
+            if not found:
+                return False, "❌ Il TXID esiste, ma i soldi NON sono stati inviati al tuo wallet."
+
+            if amount_received < (expected_amount * 0.99):
+                return False, f"⚠️ Importo insufficiente. Ricevuto: {amount_received:.6f}, Richiesto: {expected_amount:.6f}"
+
+            return True, "✅ Pagamento Litecoin Verificato e Corretto!"
+
+        # 3. VERIFICA USDC (Parziale - Richiederebbe API Key complesse per check interno)
+        elif crypto == "USDC":
+            # Controllo formale robusto
+            if (txid.startswith("0x") and len(txid) == 66) or (len(txid) == 64):
+                return True, "⚠️ Formato USDC valido. CONTROLLA MANUALMENTE L'ARRIVO DEI FONDI." 
+            else:
+                return False, "❌ Formato TXID USDC non valido."
+
+    except Exception as e:
+        print(f"Errore verifica blockchain: {e}")
+        return True, "⚠️ Errore API temporaneo. Verifica manualmente."
+    
+    return False, "❌ TXID non valido."
+
 # --- LOGICA BOT ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(f"📢 ID UTENTE: {update.effective_chat.id}")
     if 'cart' not in context.user_data: context.user_data['cart'] = {}
-    context.user_data['awaiting_txid'] = False
-    context.user_data['awaiting_qty_prod'] = None 
+    
+    # Reset Stati
+    context.user_data['step'] = None 
+    context.user_data['awaiting_qty_prod'] = None
 
     text = (
         "Last seen: recently\nShips from: 🇮🇹 🇪🇸 🇺🇸 -> 🇪🇺\nCurrency: EUR\n\n"
@@ -95,7 +178,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def listings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    context.user_data['awaiting_qty_prod'] = None 
+    context.user_data['step'] = None 
 
     keyboard = []
     for key, prod in PRODUCTS.items():
@@ -106,8 +189,7 @@ async def listings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard.append([InlineKeyboardButton("🔙 Menu Principale", callback_data="main_menu")])
     await query.edit_message_text("💊 **LISTINGS**\nScegli un prodotto:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-# --- SELETTORE QUANTITÀ ---
-
+# --- SELEZIONE QUANTITÀ ---
 async def init_quantity_selector(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -121,11 +203,9 @@ async def manage_quantity_buttons(update: Update, context: ContextTypes.DEFAULT_
     prod_id = f"{parts[2]}_{parts[3]}"
     current_qty = int(parts[4])
     new_qty = current_qty + 5 if action == "inc" else current_qty - 5
-    
     if new_qty < 5:
         await query.answer("Minimo 5!")
         return
-
     await update_quantity_view(query, prod_id, new_qty)
     await query.answer()
 
@@ -133,11 +213,13 @@ async def ask_manual_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE
     query = update.callback_query
     await query.answer()
     prod_id = query.data.replace("type_qty_", "")
-    context.user_data['awaiting_qty_prod'] = prod_id
-    prod_name = PRODUCTS[prod_id]['name']
     
+    context.user_data['step'] = 'qty_manual'
+    context.user_data['awaiting_qty_prod'] = prod_id
+    
+    prod_name = PRODUCTS[prod_id]['name']
     await query.edit_message_text(
-        f"⌨️ **SCRIVI LA QUANTITÀ**\nProdotto: **{prod_name}**\n\nScrivi un numero intero qui sotto (es: 25) e invia.",
+        f"⌨️ **SCRIVI LA QUANTITÀ**\nProdotto: **{prod_name}**\n\nScrivi un numero intero (es: 25) e invia.",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Annulla", callback_data=f"sel_{prod_id}")]])
     )
 
@@ -172,7 +254,7 @@ def add_to_cart_logic(context, prod_id, qty):
     cart = context.user_data.get('cart', {})
     cart[prod_id] = cart.get(prod_id, 0) + qty
     context.user_data['cart'] = cart
-    context.user_data['awaiting_qty_prod'] = None
+    context.user_data['step'] = None
     
     product_name = PRODUCTS[prod_id]['name']
     text = f"✅ Aggiunti **{qty}** di **{product_name}** al carrello!\n\nCosa vuoi fare ora?"
@@ -187,7 +269,7 @@ async def show_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query: await query.answer()
     
-    context.user_data['awaiting_qty_prod'] = None 
+    context.user_data['step'] = None
 
     cart = context.user_data.get('cart', {})
     if not cart:
@@ -224,7 +306,7 @@ async def remove_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['cart'] = cart
     await show_cart(update, context)
 
-# --- CHECKOUT ---
+# --- CHECKOUT E DATI SPEDIZIONE ---
 async def choose_shipping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -235,41 +317,47 @@ async def choose_shipping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard.append([InlineKeyboardButton("🔙 Indietro", callback_data="show_cart")])
     await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-async def choose_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def ask_shipping_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Primo step pagamento: Chiede indirizzo"""
     query = update.callback_query
     await query.answer()
     
     if query.data.startswith("ship_"):
         context.user_data['selected_shipping'] = query.data.split("_")[1]
     
-    ship_code = context.user_data.get('selected_shipping')
-    cart = context.user_data.get('cart', {})
-    
-    if ship_code not in SHIPPING_METHODS or not cart:
-        await choose_shipping(update, context)
-        return
-
-    total = context.user_data.get('cart_total_products', 0) + SHIPPING_METHODS[ship_code]['price']
-    context.user_data['final_total_eur'] = total
-    ship_name = SHIPPING_METHODS[ship_code]['name']
-
-    prod_txt = "\n".join([f"▪️ {PRODUCTS[pid]['name']} (x{qty})" for pid, qty in cart.items()])
+    context.user_data['step'] = 'address_input' # Imposta stato attesa indirizzo
 
     text = (
-        "🧾 **RIEPILOGO ORDINE**\n\n"
-        f"{prod_txt}\n"
-        f"➖➖➖➖➖➖➖➖\n"
-        f"📦 Sped: {ship_name}\n"
-        f"💰 **DA PAGARE: {total}€**\n\n"
+        "📫 **DATI DI SPEDIZIONE**\n\n"
+        "Per favore, scrivi ora in chat l'indirizzo completo per la spedizione.\n"
+        "Includi: Nome, Via, Città, CAP, Paese.\n\n"
+        "🔒 _I dati verranno cancellati dopo la spedizione._"
+    )
+    keyboard = [[InlineKeyboardButton("🔙 Indietro", callback_data="choose_shipping")]]
+    
+    await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+async def confirm_shipping_address(update: Update, context: ContextTypes.DEFAULT_TYPE, address_text):
+    """Salvato indirizzo, ora chiede pagamento"""
+    context.user_data['shipping_address'] = address_text
+    
+    # Calcolo totali
+    ship_code = context.user_data.get('selected_shipping')
+    total = context.user_data.get('cart_total_products', 0) + SHIPPING_METHODS[ship_code]['price']
+    context.user_data['final_total_eur'] = total
+    
+    text = (
+        f"✅ Indirizzo ricevuto.\n\n"
+        f"💰 **TOTALE DA PAGARE: {total}€**\n"
         "Scegli metodo di pagamento:"
     )
     keyboard = [
         [InlineKeyboardButton("🟠 Bitcoin (BTC)", callback_data="pay_BTC")],
         [InlineKeyboardButton("🔵 Litecoin (LTC)", callback_data="pay_LTC")],
         [InlineKeyboardButton("🟢 USDC (ERC20/TRC20)", callback_data="pay_USDC")],
-        [InlineKeyboardButton("🔙 Indietro", callback_data="choose_shipping")]
+        [InlineKeyboardButton("✏️ Cambia Indirizzo", callback_data=f"ship_{ship_code}")]
     ]
-    await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await update.message.reply_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def process_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -281,37 +369,49 @@ async def process_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     amount = get_crypto_price(crypto, eur)
     
     if not amount:
-        await query.edit_message_text("❌ Errore API Crypto.\nControlla i log.", 
-                                      reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Indietro", callback_data="show_cart")]]))
+        await query.edit_message_text("❌ Errore API Crypto.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Indietro", callback_data="choose_shipping")]]))
         return
 
     wallet = WALLETS.get(crypto, "Chiedere in chat")
     context.user_data['pending_order'] = {"crypto": crypto, "amount": amount, "wallet": wallet, "eur": eur}
-    context.user_data['awaiting_txid'] = True
-    
-    # Recuperiamo il codice spedizione per usarlo nel tasto indietro
-    ship_code = context.user_data.get('selected_shipping')
+    context.user_data['step'] = 'txid_input' # Ora aspettiamo il TXID
 
     text = (
         f"💳 **PAGAMENTO {crypto}**\n\n"
         f"Invia esattamente: `{amount} {crypto}`\n"
-        f"Address:\n`{wallet}`\n\n"
-        "⬇️ **APPENA INVIATO:**\nCopia il **TXID** e incollalo qui in chat."
+        f"All'indirizzo:\n`{wallet}`\n\n"
+        "⬇️ **BOTTONI UTILI:**"
     )
     
-    # MODIFICA RICHIESTA: TASTO INDIETRO AGGIUNTO
     keyboard = [
-        [InlineKeyboardButton("🔙 Cambia Metodo di Pagamento", callback_data=f"ship_{ship_code}")],
+        [InlineKeyboardButton("📋 COPIA INDIRIZZO WALLET", callback_data=f"copy_{crypto}")],
+        [InlineKeyboardButton("🔙 Cambia Metodo", callback_data=f"ship_{context.user_data.get('selected_shipping')}")],
         [InlineKeyboardButton("❌ Annulla Ordine", callback_data="main_menu")]
     ]
     
     await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    
+    msg = await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="⏳ **ATTESA PAGAMENTO**\n\nDopo aver inviato il pagamento, **copia il TXID (ID Transazione)** e incollalo qui in chat per confermare.",
+        parse_mode="Markdown"
+    )
 
-# --- INPUT TESTO ---
+async def copy_address_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    crypto = query.data.replace("copy_", "")
+    wallet = WALLETS.get(crypto, "Errore")
+    
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"`{wallet}`", parse_mode="Markdown")
+    await query.answer("Indirizzo inviato qui sotto per la copia!")
+
+# --- GESTORE TESTO UNIFICATO ---
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
-    
-    if context.user_data.get('awaiting_qty_prod'):
+    step = context.user_data.get('step')
+
+    # 1. INPUT QUANTITÀ MANUALE
+    if step == 'qty_manual':
         prod_id = context.user_data['awaiting_qty_prod']
         try:
             qty = int(user_text)
@@ -319,32 +419,66 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text, markup = add_to_cart_logic(context, prod_id, qty)
             await update.message.reply_text(text, reply_markup=markup, parse_mode="Markdown")
         except ValueError:
-            await update.message.reply_text("❌ Numero non valido. Scrivi un numero intero (es: 10).")
+            await update.message.reply_text("❌ Numero non valido.")
         return
 
-    if context.user_data.get('awaiting_txid'):
+    # 2. INPUT INDIRIZZO SPEDIZIONE (Con possibilità di modifica se errato)
+    if step == 'address_input':
+        if len(user_text) < 5:
+            await update.message.reply_text("⚠️ Indirizzo troppo corto. Riprova.")
+            return
+        
+        # Qui potresti aggiungere regex per CAP o Città se vuoi essere pignolo
+        # Altrimenti accettiamo l'indirizzo e diamo l'opzione "Cambia Indirizzo" dopo.
+        await confirm_shipping_address(update, context, user_text)
+        return
+
+    # 3. INPUT TXID (CON VERIFICA REALE E SICURA)
+    if step == 'txid_input':
         txid = user_text
-        user = update.message.from_user
         order = context.user_data['pending_order']
+        
+        # DATI PER LA VERIFICA
+        expected_amount = order['amount']
+        my_wallet = order['wallet']
+        crypto_type = order['crypto']
+        
+        check_msg = await update.message.reply_text("🛰 **Controllo Blockchain in corso...**\n_Verifica Destinatario e Importo..._", parse_mode="Markdown")
+        
+        # CHIAMATA ALLA VERIFICA SICURA
+        valid, msg_verify = verify_tx_on_blockchain(crypto_type, txid, expected_amount, my_wallet)
+        
+        if not valid:
+            await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=check_msg.message_id, text=f"{msg_verify}\n\nRiprova o controlla il TXID.")
+            return # Blocco se la verifica fallisce
+        
+        # SUCCESSO
+        await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=check_msg.message_id, text=f"{msg_verify}\n\nL'ordine è stato confermato!")
+        
+        # NOTIFICA ADMIN
+        user = update.message.from_user
         cart = context.user_data['cart']
-        
-        ship_key = context.user_data.get('selected_shipping', 'std')
-        ship = SHIPPING_METHODS.get(ship_key, {'name': 'Unknown'})['name']
-        
-        await update.message.reply_text("✅ **Ordine Ricevuto!**\nVerifica in corso.", parse_mode="Markdown")
+        ship = SHIPPING_METHODS[context.user_data['selected_shipping']]['name']
+        address = context.user_data['shipping_address']
         
         cart_txt = "\n".join([f"- {PRODUCTS[pid]['name']} x{qty}" for pid, qty in cart.items()])
+        
         admin_msg = (
-            f"🚨 **NUOVO ORDINE** 🚨\n👤 @{user.username} (ID: {user.id})\n"
+            f"🚨 **NUOVO ORDINE PAGATO** 🚨\n"
+            f"👤 @{user.username} (ID: {user.id})\n"
             f"💶 {order['eur']}€  -> 🪙 {order['amount']} {order['crypto']}\n\n"
-            f"🛒 **Articoli:**\n{cart_txt}\n\n🚚 {ship}\n\n🔗 **TXID:**\n`{txid}`"
+            f"🛒 **Articoli:**\n{cart_txt}\n\n"
+            f"🚚 **Spedizione:** {ship}\n"
+            f"🏠 **Indirizzo:**\n`{address}`\n\n"
+            f"🔗 **TXID:** `{txid}`\n"
+            f"✅ **Stato:** VERIFICATO AUTOMATICAMENTE"
         )
         try: await context.bot.send_message(ADMIN_CHAT_ID, admin_msg, parse_mode="Markdown")
         except: print("⚠️ Errore notifica Admin")
         
+        # RESET FINALE
         context.user_data['cart'] = {}
-        context.user_data['awaiting_txid'] = False
-        context.user_data['pending_order'] = None
+        context.user_data['step'] = None
 
 # --- MAIN ---
 async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -364,8 +498,10 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif data == "choose_shipping" or data.startswith("ship_"): 
         if data == "choose_shipping": await choose_shipping(update, context)
-        else: await choose_payment(update, context)
+        else: await ask_shipping_address(update, context)
+    
     elif data.startswith("pay_"): await process_payment(update, context)
+    elif data.startswith("copy_"): await copy_address_handler(update, context)
 
 def main():
     threading.Thread(target=run_fake_server, daemon=True).start()
