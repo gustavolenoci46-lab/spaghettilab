@@ -7,9 +7,9 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # --- CONFIGURAZIONE ---
 TOKEN = os.getenv("BOT_TOKEN")
-CONTACT_USERNAME = "CHEFTONY_OG"  # Metti il tuo username senza @
+CONTACT_USERNAME = "CHEFTONY_OG" 
 
-# IMPORTANTE: Inserisci qui il tuo Chat ID Numerico (lo vedi nei log all'avvio)
+# IL TUO CHAT ID (Copia quello dai log di Render dopo il primo avvio)
 ADMIN_CHAT_ID = 123456789 
 
 # I TUOI WALLET
@@ -23,17 +23,17 @@ WALLETS = {
 PRODUCTS = {
     "prod_1": {"name": "🍝 Spaghetti Amnesia", "price": 50, "unit": "g"},
     "prod_2": {"name": "🍫 Hashish Carbonara", "price": 12, "unit": "g"},
-    "prod_3": {"name": "🥦 Broccoli Kush", "price": 15, "unit": "g"} # Aggiunto prodotto per test
+    "prod_3": {"name": "🥦 Broccoli Kush", "price": 15, "unit": "g"}
 }
 
-# --- METODI DI SPEDIZIONE ---
+# --- SPEDIZIONI ---
 SHIPPING_METHODS = {
-    "std": {"name": "🇮🇹 Poste Italiane (Standard)", "price": 10},
-    "exp": {"name": "🚀 Express Courier (24h)", "price": 20},
-    "stl": {"name": "🕵️‍♂️ Stealth Pro (Insurance)", "price": 35}
+    "std": {"name": "🇮🇹 Poste Italiane", "price": 10},
+    "exp": {"name": "🚀 Express (24h)", "price": 20},
+    "stl": {"name": "🕵️‍♂️ Stealth Pro", "price": 35}
 }
 
-# --- SERVER FAKE PER RENDER ---
+# --- SERVER FAKE ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -46,32 +46,48 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 def run_fake_server():
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-    print(f"Server fake avviato sulla porta {port}")
     server.serve_forever()
 
-# --- UTILS ---
+# --- UTILS CRYPTO (MIGLIORATA) ---
 def get_crypto_price(crypto_symbol, fiat_amount):
     try:
+        # Mappatura ID CoinGecko corretta
         ids = {"BTC": "bitcoin", "LTC": "litecoin", "USDC": "usd-coin"}
         cg_id = ids.get(crypto_symbol)
+        
         url = f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=eur"
-        response = requests.get(url).json()
+        
+        # Aggiungiamo User-Agent per evitare blocchi
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers).json()
+        
+        # Debug Log: vediamo cosa risponde CoinGecko
+        print(f"DEBUG CRYPTO {crypto_symbol}: {response}")
+
+        if cg_id not in response:
+            print(f"Errore: {cg_id} non trovato nella risposta API")
+            return None
+
         price_in_eur = response[cg_id]['eur']
         return round(fiat_amount / price_in_eur, 6)
-    except:
+    except Exception as e:
+        print(f"CRASH CRYPTO FUNCTION: {e}")
         return None
 
-# --- BOT LOGIC ---
+# --- LOGICA BOT ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(f"📢 ID UTENTE: {update.effective_chat.id}") # Copia questo ID per ADMIN_CHAT_ID
+    print(f"📢 ID UTENTE: {update.effective_chat.id}")
     if 'cart' not in context.user_data: context.user_data['cart'] = {}
+    
+    # Resettiamo gli stati di attesa input
     context.user_data['awaiting_txid'] = False
+    context.user_data['awaiting_qty_prod'] = None 
 
     text = (
         "Last seen: recently\nShips from: 🇮🇹 🇪🇸 🇺🇸 -> 🇪🇺\nCurrency: EUR\n\n"
         "🍝 SPAGHETTIMAFIA SHOP 🍝\n\n🔔 BEFORE ORDERING -> READ OUR POLICY\n\n"
-        "✅ Premium Quality\n✅ Europe Delivery\n✅ Best Prices\n✅ 24/7 Customer Service"
+        "✅ Premium Quality\n✅ Europe Delivery\n✅ Best Prices"
     )
     keyboard = [
         [InlineKeyboardButton("💊 Listings (Prodotti)", callback_data="listings")],
@@ -85,6 +101,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def listings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    
+    # Resetta stati input se l'utente torna indietro
+    context.user_data['awaiting_qty_prod'] = None 
+
     keyboard = []
     for key, prod in PRODUCTS.items():
         btn_text = f"{prod['name']} - {prod['price']}€/{prod['unit']}"
@@ -92,76 +112,129 @@ async def listings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard.append([InlineKeyboardButton("🛒 Vai al Carrello", callback_data="show_cart")])
     keyboard.append([InlineKeyboardButton("🔙 Menu Principale", callback_data="main_menu")])
-    await query.edit_message_text("💊 **LISTINGS**\nScegli un prodotto da aggiungere:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await query.edit_message_text("💊 **LISTINGS**\nScegli un prodotto:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-async def select_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- SELETTORE QUANTITÀ (STEP DI 5 + INPUT MANUALE) ---
+
+async def init_quantity_selector(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     prod_id = query.data.split("_")[1] + "_" + query.data.split("_")[2]
-    product = PRODUCTS[prod_id]
     
-    text = f"Hai scelto: **{product['name']}**\nPrezzo: {product['price']}€ al {product['unit']}.\n\nQuanto ne vuoi aggiungere?"
+    # Parte da 5 come richiesto
+    await update_quantity_view(query, prod_id, 5)
+
+async def manage_quantity_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    parts = query.data.split("_") # qty_inc_prod_1_5
+    action = parts[1]
+    prod_id = f"{parts[2]}_{parts[3]}"
+    current_qty = int(parts[4])
+    
+    new_qty = current_qty
+    step = 5 # SALTO DI 5
+
+    if action == "inc":
+        new_qty += step
+    elif action == "dec":
+        if current_qty > step: 
+            new_qty -= step
+        else:
+            await query.answer(f"Minimo {step}!")
+            return
+
+    await update_quantity_view(query, prod_id, new_qty)
+    await query.answer()
+
+async def ask_manual_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Prepara il bot a ricevere un numero scritto a mano"""
+    query = update.callback_query
+    await query.answer()
+    prod_id = query.data.replace("type_qty_", "")
+    
+    # Impostiamo lo stato: "Stiamo aspettando un numero per questo prodotto"
+    context.user_data['awaiting_qty_prod'] = prod_id
+    
+    prod_name = PRODUCTS[prod_id]['name']
+    
+    await query.edit_message_text(
+        f"⌨️ **SCRIVI LA QUANTITÀ**\n\n"
+        f"Prodotto: **{prod_name}**\n\n"
+        "Scrivi un numero intero qui sotto e invia (es: `25`, `100`).",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Annulla", callback_data=f"sel_{prod_id}")]])
+    )
+
+async def update_quantity_view(query, prod_id, qty):
+    product = PRODUCTS[prod_id]
+    tot_price = product['price'] * qty
+    
+    text = (
+        f"💊 **{product['name']}**\n"
+        f"Prezzo: {product['price']}€/{product['unit']}\n\n"
+        f"🔢 Quantità: **{qty} {product['unit']}**\n"
+        f"💰 Totale Parziale: **{tot_price}€**"
+    )
+    
     keyboard = [
-        [InlineKeyboardButton("1", callback_data=f"add_{prod_id}_1"), InlineKeyboardButton("2", callback_data=f"add_{prod_id}_2"), InlineKeyboardButton("5", callback_data=f"add_{prod_id}_5")],
-        [InlineKeyboardButton("10", callback_data=f"add_{prod_id}_10"), InlineKeyboardButton("50", callback_data=f"add_{prod_id}_50")],
-        [InlineKeyboardButton("🔙 Indietro", callback_data="listings")]
+        [
+            InlineKeyboardButton("➖ 5", callback_data=f"qty_dec_{prod_id}_{qty}"),
+            InlineKeyboardButton(f" {qty} ", callback_data="noop"),
+            InlineKeyboardButton("➕ 5", callback_data=f"qty_inc_{prod_id}_{qty}")
+        ],
+        [InlineKeyboardButton("⌨️ Scrivi a mano", callback_data=f"type_qty_{prod_id}")],
+        [InlineKeyboardButton(f"✅ Aggiungi {qty} al Carrello", callback_data=f"add_{prod_id}_{qty}")],
+        [InlineKeyboardButton("🔙 Torna ai Prodotti", callback_data="listings")]
     ]
+    
     await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-async def add_to_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    parts = query.data.split("_")
-    prod_id = f"{parts[1]}_{parts[2]}"
-    qty = int(parts[3])
-    
+async def add_to_cart_logic(context, prod_id, qty):
+    """Logica condivisa per aggiungere al carrello (da bottoni o da tastiera)"""
     cart = context.user_data.get('cart', {})
-    # Accumula quantità se il prodotto esiste già
     cart[prod_id] = cart.get(prod_id, 0) + qty
     context.user_data['cart'] = cart
     
-    product_name = PRODUCTS[prod_id]['name']
+    # Resetta stato input manuale
+    context.user_data['awaiting_qty_prod'] = None
     
+    product_name = PRODUCTS[prod_id]['name']
     text = f"✅ Aggiunti **{qty}** di **{product_name}** al carrello!\n\nCosa vuoi fare ora?"
     keyboard = [
-        [InlineKeyboardButton("🛍 Continua Shopping (Aggiungi altro)", callback_data="listings")],
-        [InlineKeyboardButton("🛒 Vai al Carrello (Paga)", callback_data="show_cart")]
+        [InlineKeyboardButton("🛍 Continua Shopping", callback_data="listings")],
+        [InlineKeyboardButton("🛒 Vai al Carrello", callback_data="show_cart")]
     ]
-    await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    return text, InlineKeyboardMarkup(keyboard)
 
+# --- GESTORE CART ---
 async def show_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query: await query.answer()
     
+    # Resetta stati
+    context.user_data['awaiting_qty_prod'] = None
+
     cart = context.user_data.get('cart', {})
-    
     if not cart:
         await (query.edit_message_text if query else update.message.reply_text)(
-            "🛒 **Il tuo carrello è vuoto!**", 
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Torna allo Shop", callback_data="listings")]]),
-            parse_mode="Markdown"
+            "🛒 **Carrello vuoto!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Shop", callback_data="listings")]]), parse_mode="Markdown"
         )
         return
 
     text = "🛒 **IL TUO CARRELLO**\n\n"
     total = 0
     keyboard = []
-
-    # Genera lista prodotti con tasto Rimuovi per ognuno
     for prod_id, qty in cart.items():
         prod = PRODUCTS[prod_id]
         subtotal = prod['price'] * qty
         total += subtotal
         text += f"▪️ {prod['name']} x{qty} = {subtotal}€\n"
-        
-        # Tasto per rimuovere il singolo prodotto
         keyboard.append([InlineKeyboardButton(f"❌ Rimuovi {prod['name']}", callback_data=f"rem_{prod_id}")])
     
     context.user_data['cart_total_products'] = total
-    text += f"\n💰 **Totale parziale: {total}€**"
+    text += f"\n💰 **Totale Merce: {total}€**"
     
-    # Tasti azione finali
     keyboard.append([InlineKeyboardButton("🚚 Procedi alla Spedizione", callback_data="choose_shipping")])
-    keyboard.append([InlineKeyboardButton("🔙 Menu", callback_data="main_menu")]) # Tolto "Svuota tutto" per pulizia, si usa il tasto rimuovi singolo
+    keyboard.append([InlineKeyboardButton("🔙 Menu", callback_data="main_menu")])
 
     await (query.edit_message_text if query else update.message.reply_text)(
         text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
@@ -170,18 +243,12 @@ async def show_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def remove_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     prod_id = query.data.replace("rem_", "")
-    
     cart = context.user_data.get('cart', {})
-    if prod_id in cart:
-        del cart[prod_id]
-        context.user_data['cart'] = cart
-        await query.answer("Prodotto rimosso!")
-    else:
-        await query.answer("Prodotto già rimosso.")
-    
+    if prod_id in cart: del cart[prod_id]
+    context.user_data['cart'] = cart
     await show_cart(update, context)
 
-# --- SPEDIZIONE & PAGAMENTO ---
+# --- SPEDIZIONE & CHECKOUT ---
 async def choose_shipping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -197,23 +264,29 @@ async def choose_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     if query.data.startswith("ship_"):
-        ship_code = query.data.split("_")[1]
-        context.user_data['selected_shipping'] = ship_code
+        context.user_data['selected_shipping'] = query.data.split("_")[1]
     
     ship_code = context.user_data.get('selected_shipping')
-    if ship_code not in SHIPPING_METHODS:
-         # Fallback se c'è errore
+    cart = context.user_data.get('cart', {})
+    
+    if ship_code not in SHIPPING_METHODS or not cart:
         await choose_shipping(update, context)
         return
 
-    total_prod = context.user_data.get('cart_total_products', 0)
-    ship_price = SHIPPING_METHODS[ship_code]['price']
-    final_total = total_prod + ship_price
-    context.user_data['final_total_eur'] = final_total
+    total = context.user_data.get('cart_total_products', 0) + SHIPPING_METHODS[ship_code]['price']
+    context.user_data['final_total_eur'] = total
+    ship_name = SHIPPING_METHODS[ship_code]['name']
+
+    # Riepilogo prodotti visuale
+    prod_txt = "\n".join([f"▪️ {PRODUCTS[pid]['name']} (x{qty})" for pid, qty in cart.items()])
 
     text = (
-        f"📦 Spedizione: {SHIPPING_METHODS[ship_code]['name']}\n"
-        f"💰 **TOTALE ORDINE: {final_total}€**\n\nScegli metodo di pagamento:"
+        "🧾 **RIEPILOGO ORDINE**\n\n"
+        f"{prod_txt}\n"
+        f"➖➖➖➖➖➖➖➖\n"
+        f"📦 Sped: {ship_name}\n"
+        f"💰 **DA PAGARE: {total}€**\n\n"
+        "Scegli metodo di pagamento:"
     )
     keyboard = [
         [InlineKeyboardButton("🟠 Bitcoin (BTC)", callback_data="pay_BTC")],
@@ -229,11 +302,12 @@ async def process_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     crypto = query.data.replace("pay_", "")
     eur = context.user_data['final_total_eur']
     
-    await query.edit_message_text(f"🔄 Calcolo cambio {crypto}...")
+    await query.edit_message_text(f"🔄 Connessione API per cambio {crypto}...")
     amount = get_crypto_price(crypto, eur)
     
     if not amount:
-        await query.edit_message_text("❌ Errore cambio. Riprova.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Indietro", callback_data="show_cart")]]))
+        await query.edit_message_text("❌ Errore API Crypto.\nControlla i log o riprova più tardi.", 
+                                      reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Indietro", callback_data="show_cart")]]))
         return
 
     wallet = WALLETS.get(crypto, "Chiedere in chat")
@@ -241,52 +315,89 @@ async def process_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['awaiting_txid'] = True
 
     text = (
-        f"💳 **PAGAMENTO {crypto}**\n\nInvia esattamente: `{amount} {crypto}`\n"
-        f"All'indirizzo:\n`{wallet}`\n\n"
-        "⬇️ **APPENA INVIATO:**\nCopia il **TXID** (ID Transazione) e incollalo qui in chat per confermare l'ordine."
+        f"💳 **PAGAMENTO {crypto}**\n\n"
+        f"Invia esattamente: `{amount} {crypto}`\n"
+        f"Address:\n`{wallet}`\n\n"
+        "⬇️ **APPENA INVIATO:**\nCopia il **TXID** e incollalo qui in chat."
     )
     keyboard = [[InlineKeyboardButton("❌ Annulla", callback_data="main_menu")]]
     await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-async def handle_txid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get('awaiting_txid'): return
+# --- GESTORE TESTO (INPUT MANUALE + TXID) ---
+async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_text = update.message.text
     
-    txid = update.message.text
-    user = update.message.from_user
-    order = context.user_data['pending_order']
-    cart = context.user_data['cart']
-    ship = SHIPPING_METHODS[context.user_data['selected_shipping']]['name']
-    
-    await update.message.reply_text("✅ **Ordine Ricevuto!**\nStiamo verificando il pagamento. A breve riceverai conferma.", parse_mode="Markdown")
-    
-    cart_txt = "\n".join([f"- {PRODUCTS[pid]['name']} x{qty}" for pid, qty in cart.items()])
-    
-    admin_msg = (
-        f"🚨 **NUOVO ORDINE** 🚨\n👤 @{user.username} (ID: {user.id})\n"
-        f"💶 {order['eur']}€  -> 🪙 {order['amount']} {order['crypto']}\n\n"
-        f"🛒 **Articoli:**\n{cart_txt}\n\n🚚 {ship}\n\n🔗 **TXID:**\n`{txid}`"
-    )
-    try: await context.bot.send_message(ADMIN_CHAT_ID, admin_msg, parse_mode="Markdown")
-    except: print("⚠️ Errore invio notifica Admin")
+    # CASO 1: UTENTE STA INSERENDO QUANTITÀ MANUALE
+    if context.user_data.get('awaiting_qty_prod'):
+        prod_id = context.user_data['awaiting_qty_prod']
+        try:
+            qty = int(user_text)
+            if qty <= 0: raise ValueError
+            
+            # Se è un numero valido, aggiungi al carrello
+            text, markup = await add_to_cart_logic(context, prod_id, qty)
+            await update.message.reply_text(text, reply_markup=markup, parse_mode="Markdown")
+            
+        except ValueError:
+            await update.message.reply_text("❌ Per favore scrivi un numero intero valido (es: 10, 50).")
+        return
 
-    context.user_data['cart'] = {}
-    context.user_data['awaiting_txid'] = False
+    # CASO 2: UTENTE STA INVIANDO TXID
+    if context.user_data.get('awaiting_txid'):
+        txid = user_text
+        user = update.message.from_user
+        order = context.user_data['pending_order']
+        cart = context.user_data['cart']
+        
+        # Recupero nome spedizione sicuro
+        ship_key = context.user_data.get('selected_shipping', 'std')
+        ship = SHIPPING_METHODS.get(ship_key, {'name': 'Unknown'})['name']
+        
+        await update.message.reply_text("✅ **Ordine Ricevuto!**\nVerifica in corso.", parse_mode="Markdown")
+        
+        cart_txt = "\n".join([f"- {PRODUCTS[pid]['name']} x{qty}" for pid, qty in cart.items()])
+        admin_msg = (
+            f"🚨 **NUOVO ORDINE** 🚨\n👤 @{user.username} (ID: {user.id})\n"
+            f"💶 {order['eur']}€  -> 🪙 {order['amount']} {order['crypto']}\n\n"
+            f"🛒 **Articoli:**\n{cart_txt}\n\n🚚 {ship}\n\n🔗 **TXID:**\n`{txid}`"
+        )
+        try: await context.bot.send_message(ADMIN_CHAT_ID, admin_msg, parse_mode="Markdown")
+        except: print("⚠️ Errore notifica Admin")
+        
+        context.user_data['cart'] = {}
+        context.user_data['awaiting_txid'] = False
+        context.user_data['pending_order'] = None
 
-async def policy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.edit_message_text(
-        "📣 **OUR POLICY**\n\nSpedizioni rapide, pacchi anonimi.",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="main_menu")]]), parse_mode="Markdown"
-    )
+# --- ROUTER E MAIN ---
+
+async def add_to_cart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler wrapper per i bottoni Aggiungi"""
+    query = update.callback_query
+    parts = query.data.split("_")
+    prod_id = f"{parts[1]}_{parts[2]}"
+    qty = int(parts[3])
+    text, markup = await add_to_cart_logic(context, prod_id, qty)
+    await query.edit_message_text(text=text, reply_markup=markup, parse_mode="Markdown")
 
 async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = update.callback_query.data
     if data == "main_menu": await start(update, context)
     elif data == "listings": await listings(update, context)
-    elif data == "policy": await policy(update, context)
+    elif data == "policy": 
+        await update.callback_query.edit_message_text("📣 **OUR POLICY**\n\n...", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="main_menu")]]))
     elif data == "show_cart": await show_cart(update, context)
-    elif data.startswith("sel_"): await select_quantity(update, context)
-    elif data.startswith("add_"): await add_to_cart(update, context)
-    elif data.startswith("rem_"): await remove_item(update, context) # Nuovo handler rimozione
+    elif data == "noop": await update.callback_query.answer()
+    
+    # Selezione Quantità
+    elif data.startswith("sel_"): await init_quantity_selector(update, context)
+    elif data.startswith("qty_"): await manage_quantity_buttons(update, context)
+    elif data.startswith("type_qty_"): await ask_manual_quantity(update, context)
+    
+    # Aggiungi/Rimuovi
+    elif data.startswith("add_"): await add_to_cart_handler(update, context)
+    elif data.startswith("rem_"): await remove_item(update, context)
+    
+    # Checkout
     elif data == "choose_shipping" or data.startswith("ship_"): 
         if data == "choose_shipping": await choose_shipping(update, context)
         else: await choose_payment(update, context)
@@ -297,7 +408,8 @@ def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(router))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_txid))
+    # Unico handler per il testo che smista in base allo stato (Qtà o TXID)
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text_input))
     print("Bot avviato su Render ✔️")
     app.run_polling()
 
