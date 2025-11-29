@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # ==========================================
 
 TOKEN = os.getenv("BOT_TOKEN") 
-CONTACT_USERNAME = "tuo_username_qui" 
+CONTACT_USERNAME = "CHEFTONY_OG" 
 ADMIN_CHAT_ID = 123456789 
 
 WALLETS = {
@@ -143,8 +143,11 @@ def verify_tx_on_blockchain(crypto, txid, expected_amount, my_wallet_address):
     return False, "❌ TXID non valido."
 
 async def cleanup_messages(context, chat_id):
-    """Pulisce i messaggi temporanei salvati."""
-    for key in ['warning_msg_id', 'wallet_msg_id', 'menu_msg_id']:
+    """
+    FIX: Cancella SOLO i messaggi temporanei (warning, wallet).
+    NON tocca più il menu principale per evitare che sparisca tutto.
+    """
+    for key in ['warning_msg_id', 'wallet_msg_id']:
         msg_id = context.user_data.get(key)
         if msg_id:
             try: await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
@@ -155,10 +158,24 @@ async def cleanup_messages(context, chat_id):
 # 🤖 LOGICA BOT
 # ==========================================
 
+async def safe_edit_or_send(update, context, text, reply_markup):
+    """Funzione intelligente che prova a modificare, se fallisce invia nuovo."""
+    try:
+        if update.callback_query:
+            await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode="Markdown")
+        else:
+            await update.message.reply_text(text=text, reply_markup=reply_markup, parse_mode="Markdown")
+    except error.BadRequest:
+        # Se non può modificare (es. messaggio cancellato o troppo vecchio), invia nuovo
+        if update.callback_query:
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode="Markdown")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'cart' not in context.user_data: context.user_data['cart'] = {}
     context.user_data['step'] = None 
     context.user_data['selected_shipping'] = None 
+    
+    # Pulizia leggera
     await cleanup_messages(context, update.effective_chat.id)
 
     text = (
@@ -177,15 +194,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🛒 Il mio Carrello", callback_data="show_cart")]
     ]
     
-    if update.callback_query: 
-        await update.callback_query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-    else: 
-        msg = await update.message.reply_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-        context.user_data['menu_msg_id'] = msg.message_id
+    await safe_edit_or_send(update, context, text, InlineKeyboardMarkup(keyboard))
 
 async def listings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+    query = update.callback_query; await query.answer()
     context.user_data['step'] = None 
     await cleanup_messages(context, update.effective_chat.id)
 
@@ -197,13 +209,13 @@ async def listings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard.append([InlineKeyboardButton("🛒 Vai al Carrello", callback_data="show_cart")])
     keyboard.append([InlineKeyboardButton("🔙 Menu Principale", callback_data="main_menu")])
     
-    await query.edit_message_text("💊 **LISTINGS**\nScegli un prodotto:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await safe_edit_or_send(update, context, "💊 **LISTINGS**\nScegli un prodotto:", InlineKeyboardMarkup(keyboard))
 
 async def policy_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer()
     text = "📣 **OUR POLICY**\n\n1. No refunds without video opening.\n2. Shipping time 2-5 days.\n3. Be polite."
     keyboard = [[InlineKeyboardButton("🔙 Menu", callback_data="main_menu")]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await safe_edit_or_send(update, context, text, InlineKeyboardMarkup(keyboard))
 
 # --- QUANTITA' ---
 
@@ -228,9 +240,9 @@ async def ask_manual_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data['step'] = 'qty_manual'; context.user_data['awaiting_qty_prod'] = prod_id
     
     prod_name = PRODUCTS[prod_id]['name']
-    await query.edit_message_text(
+    await safe_edit_or_send(update, context, 
         f"⌨️ **QUANTITÀ MANUALE**\n\nProdotto: **{prod_name}**\nScrivi in chat il numero esatto (es. 25) e invia.",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Annulla", callback_data=f"sel_{prod_id}")]])
+        InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Annulla", callback_data=f"sel_{prod_id}")]])
     )
 
 async def update_quantity_view(query, prod_id, qty):
@@ -261,7 +273,7 @@ async def execute_add_to_cart(update, context, prod_id, qty):
     keyboard = [[InlineKeyboardButton("🛍 Continua Shopping", callback_data="listings")], [InlineKeyboardButton("🛒 Vai al Carrello", callback_data="show_cart")]]
     
     if hasattr(update, 'callback_query') and update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        await safe_edit_or_send(update, context, text, InlineKeyboardMarkup(keyboard))
     else:
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
@@ -271,7 +283,7 @@ async def show_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cart = context.user_data.get('cart', {})
     
     if not cart: 
-        await query.edit_message_text("🛒 **Carrello vuoto!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Shop", callback_data="listings")]]), parse_mode="Markdown")
+        await safe_edit_or_send(update, context, "🛒 **Carrello vuoto!**", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Shop", callback_data="listings")]]))
         return
     
     total = sum([PRODUCTS[pid]['price'] * q for pid, q in cart.items() if pid in PRODUCTS])
@@ -283,7 +295,7 @@ async def show_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🚚 Procedi alla Spedizione", callback_data="choose_shipping")], 
         [InlineKeyboardButton("🔙 Menu", callback_data="main_menu")]
     ]
-    await query.edit_message_text(f"🛒 **CARRELLO**\n\n{recap}\n💰 **Totale Merce: {total}€**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await safe_edit_or_send(update, context, f"🛒 **CARRELLO**\n\n{recap}\n💰 **Totale Merce: {total}€**", InlineKeyboardMarkup(keyboard))
 
 async def empty_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['cart'] = {}; await show_cart(update, context)
@@ -296,32 +308,32 @@ async def choose_shipping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['selected_shipping'] = None
     
     keyboard = []
-    # Usiamo "CMD_SHIP_" per sicurezza
     for code, method in SHIPPING_METHODS.items():
         keyboard.append([InlineKeyboardButton(f"{method['name']} (+{method['price']}€)", callback_data=f"CMD_SHIP_{code}")])
     
     keyboard.append([InlineKeyboardButton("🔙 Indietro", callback_data="show_cart")])
-    await query.edit_message_text("🚚 **Scegli Spedizione:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await safe_edit_or_send(update, context, "🚚 **Scegli Spedizione:**", InlineKeyboardMarkup(keyboard))
 
 async def handle_shipping_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Gestisce il click e chiede l'indirizzo."""
+    """
+    Gestisce il click e chiede l'indirizzo.
+    Usa 'delete' + 'send' per evitare il blocco qui.
+    """
     query = update.callback_query
     await query.answer()
     
-    # ⚠️ FIX: Estrae il codice solo se esiste CMD_SHIP_, altrimenti usa split normale per compatibilità
     if "CMD_SHIP_" in query.data:
         ship_code = query.data.replace("CMD_SHIP_", "")
     else:
         ship_code = query.data.split("_")[-1]
     
     if ship_code not in SHIPPING_METHODS:
-        await query.edit_message_text("⚠️ Errore. Riprova.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Indietro", callback_data="choose_shipping")]]))
-        return
+        await choose_shipping(update, context); return
 
     context.user_data['selected_shipping'] = ship_code
     context.user_data['step'] = 'address_input'
     
-    # METODO SICURO: Cancella e riscrivi
+    # QUI CANCELLIAMO E RISCRIVIAMO PER SICUREZZA (È UN CAMBIO DI STATO CRITICO)
     try: await query.delete_message()
     except: pass
 
@@ -364,6 +376,7 @@ async def show_payment_methods(update: Update, context: ContextTypes.DEFAULT_TYP
     if from_text: 
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     else: 
+        # Qui usiamo delete+send perché passiamo da "input testo" a "menu"
         try: await update.callback_query.delete_message()
         except: pass
         await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
@@ -459,28 +472,22 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = update.callback_query.data
     
+    # CANCELLA SOLO MESSAGGI TEMPORANEI (NON IL MENU)
     if data in ["main_menu", "to_pay_methods", "show_cart", "listings"]: 
         await cleanup_messages(context, update.effective_chat.id)
     
     try:
-        # !!! FIX CRUCIALE NEL ROUTER: ORDINE CORRETTO !!!
-        
-        # 1. Controlliamo se è un comando di navigazione "choose_shipping"
-        if data == "choose_shipping": 
-            await choose_shipping(update, context)
-            return
-
-        # 2. POI controlliamo se è una selezione di spedizione (contiene "CMD_SHIP_")
-        if "CMD_SHIP_" in data:
+        # CATTURA UNIVERSALE SPEDIZIONE
+        if "ship" in data or "SHIP" in data:
             await handle_shipping_selection(update, context)
             return
 
-        # 3. Poi tutto il resto
         if data == "main_menu": await start(update, context)
         elif data == "listings": await listings(update, context)
         elif data == "policy": await policy_page(update, context)
         elif data == "show_cart": await show_cart(update, context)
         elif data == "empty_cart": await empty_cart(update, context)
+        elif data == "choose_shipping": await choose_shipping(update, context)
         
         elif data == "to_pay_methods": await show_payment_methods(update, context, from_text=False)
         
