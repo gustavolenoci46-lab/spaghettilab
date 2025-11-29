@@ -1,9 +1,24 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 import os
-# Non serve più importare asyncio esplicitamente per il main
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 TOKEN = os.getenv("BOT_TOKEN")
+
+# --- INIZIO CODICE SERVER FAKE PER RENDER ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive!")
+
+def run_fake_server():
+    port = int(os.environ.get("PORT", 10000))  # Render ci dà la porta qui
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    print(f"Server fake avviato sulla porta {port}")
+    server.serve_forever()
+# --- FINE CODICE SERVER FAKE ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -34,17 +49,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "aiuto":
         await query.edit_message_text("❓ In cosa posso aiutarti?")
 
-# NOTA: Ho rimosso 'async' qui sotto
 def main():
+    # Avvia il server fake in un thread separato PRIMA del bot
+    server_thread = threading.Thread(target=run_fake_server)
+    server_thread.daemon = True
+    server_thread.start()
+
+    # Avvia il bot
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
 
     print("Bot avviato su Render ✔️")
-    
-    # NOTA: Ho rimosso 'await' qui sotto
     app.run_polling()
 
 if __name__ == "__main__":
-    # NOTA: Ho rimosso asyncio.run(...)
     main()
