@@ -143,11 +143,8 @@ def verify_tx_on_blockchain(crypto, txid, expected_amount, my_wallet_address):
     return False, "❌ TXID non valido."
 
 async def cleanup_messages(context, chat_id):
-    """
-    CORRETTO: Cancella SOLO i messaggi di avviso e wallet temporanei.
-    NON cancella più 'menu_msg_id', così la navigazione non si rompe.
-    """
-    for key in ['warning_msg_id', 'wallet_msg_id']: 
+    """Pulisce i messaggi temporanei salvati."""
+    for key in ['warning_msg_id', 'wallet_msg_id', 'menu_msg_id']:
         msg_id = context.user_data.get(key)
         if msg_id:
             try: await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
@@ -183,7 +180,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query: 
         await update.callback_query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     else: 
-        await update.message.reply_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        msg = await update.message.reply_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        context.user_data['menu_msg_id'] = msg.message_id
 
 async def listings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -199,7 +197,6 @@ async def listings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard.append([InlineKeyboardButton("🛒 Vai al Carrello", callback_data="show_cart")])
     keyboard.append([InlineKeyboardButton("🔙 Menu Principale", callback_data="main_menu")])
     
-    # QUI ORA FUNZIONA PERCHÉ NON ABBIAMO CANCELLATO IL MESSAGGIO PRIMA
     await query.edit_message_text("💊 **LISTINGS**\nScegli un prodotto:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def policy_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -299,7 +296,7 @@ async def choose_shipping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['selected_shipping'] = None
     
     keyboard = []
-    # Usiamo "CMD_SHIP_" per sicurezza, intercettato dal router
+    # Usiamo "CMD_SHIP_" per sicurezza
     for code, method in SHIPPING_METHODS.items():
         keyboard.append([InlineKeyboardButton(f"{method['name']} (+{method['price']}€)", callback_data=f"CMD_SHIP_{code}")])
     
@@ -311,7 +308,11 @@ async def handle_shipping_selection(update: Update, context: ContextTypes.DEFAUL
     query = update.callback_query
     await query.answer()
     
-    ship_code = query.data.split("_")[-1] # Prende l'ultima parte
+    # ⚠️ FIX: Estrae il codice solo se esiste CMD_SHIP_, altrimenti usa split normale per compatibilità
+    if "CMD_SHIP_" in query.data:
+        ship_code = query.data.replace("CMD_SHIP_", "")
+    else:
+        ship_code = query.data.split("_")[-1]
     
     if ship_code not in SHIPPING_METHODS:
         await query.edit_message_text("⚠️ Errore. Riprova.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Indietro", callback_data="choose_shipping")]]))
@@ -320,7 +321,7 @@ async def handle_shipping_selection(update: Update, context: ContextTypes.DEFAUL
     context.user_data['selected_shipping'] = ship_code
     context.user_data['step'] = 'address_input'
     
-    # METODO SICURO: Cancella e riscrivi (solo per questa transizione delicata)
+    # METODO SICURO: Cancella e riscrivi
     try: await query.delete_message()
     except: pass
 
@@ -363,7 +364,6 @@ async def show_payment_methods(update: Update, context: ContextTypes.DEFAULT_TYP
     if from_text: 
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     else: 
-        # Metodo sicuro anche qui
         try: await update.callback_query.delete_message()
         except: pass
         await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
@@ -459,22 +459,28 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = update.callback_query.data
     
-    # PULIZIA SICURA: Cancella solo se NON stiamo navigando nei menu principali,
-    # oppure se l'handler specifico lo richiede.
-    # Qui NON chiamiamo cleanup_messages per evitare di cancellare il menu.
+    if data in ["main_menu", "to_pay_methods", "show_cart", "listings"]: 
+        await cleanup_messages(context, update.effective_chat.id)
     
     try:
-        # CATTURA UNIVERSALE SPEDIZIONE
-        if "ship" in data or "SHIP" in data:
+        # !!! FIX CRUCIALE NEL ROUTER: ORDINE CORRETTO !!!
+        
+        # 1. Controlliamo se è un comando di navigazione "choose_shipping"
+        if data == "choose_shipping": 
+            await choose_shipping(update, context)
+            return
+
+        # 2. POI controlliamo se è una selezione di spedizione (contiene "CMD_SHIP_")
+        if "CMD_SHIP_" in data:
             await handle_shipping_selection(update, context)
             return
 
+        # 3. Poi tutto il resto
         if data == "main_menu": await start(update, context)
         elif data == "listings": await listings(update, context)
         elif data == "policy": await policy_page(update, context)
         elif data == "show_cart": await show_cart(update, context)
         elif data == "empty_cart": await empty_cart(update, context)
-        elif data == "choose_shipping": await choose_shipping(update, context)
         
         elif data == "to_pay_methods": await show_payment_methods(update, context, from_text=False)
         
