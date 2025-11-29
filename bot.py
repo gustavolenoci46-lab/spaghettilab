@@ -6,7 +6,7 @@ import requests
 import logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# --- LOGGING ---
+# --- LOGGING VISIBILE NELLA CONSOLE ---
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -156,23 +156,18 @@ async def cleanup_messages(context, chat_id):
 # ==========================================
 
 async def safe_edit_or_send(update, context, text, reply_markup):
-    """
-    Funzione helper per gestire l'aggiornamento dei messaggi
-    senza causare crash o schermate bianche.
-    """
+    """Funzione intelligente che prova a modificare, se fallisce invia nuovo."""
     try:
         if update.callback_query:
-            # Prova a modificare
             await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode="Markdown")
         else:
-            # Se non c'è callback (es. comando testuale), invia nuovo
             await update.message.reply_text(text=text, reply_markup=reply_markup, parse_mode="Markdown")
     except error.BadRequest:
-        # Se la modifica fallisce (msg non trovato/vecchio), INVIA NUOVO
         if update.callback_query:
             await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode="Markdown")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print("DEBUG: Start chiamato")
     if 'cart' not in context.user_data: context.user_data['cart'] = {}
     context.user_data['step'] = None 
     context.user_data['selected_shipping'] = None 
@@ -227,6 +222,7 @@ async def manage_quantity_buttons(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     parts = query.data.split("_")
     action = parts[1]; current_qty = int(parts[-1]); prod_id = "_".join(parts[2:-1])
+    
     new_qty = current_qty + 5 if action == "inc" else current_qty - 5
     if new_qty < 5: await query.answer("Minimo 5!"); return
     await update_quantity_view(query, prod_id, new_qty)
@@ -273,7 +269,6 @@ async def execute_add_to_cart(update, context, prod_id, qty):
     if hasattr(update, 'callback_query') and update.callback_query:
         await safe_edit_or_send(update, context, text, InlineKeyboardMarkup(keyboard))
     else:
-        # Se da testo, rispondi e cancella il messaggio utente se possibile
         try: await update.message.delete()
         except: pass
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
@@ -305,10 +300,12 @@ async def empty_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def choose_shipping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Mostra i metodi di spedizione."""
+    print("DEBUG: Choose Shipping")
     query = update.callback_query; await query.answer()
     context.user_data['selected_shipping'] = None
     
     keyboard = []
+    # Usiamo "CMD_SHIP_" per rendere il comando unico
     for code, method in SHIPPING_METHODS.items():
         keyboard.append([InlineKeyboardButton(f"{method['name']} (+{method['price']}€)", callback_data=f"CMD_SHIP_{code}")])
     
@@ -318,10 +315,12 @@ async def choose_shipping(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_shipping_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Gestisce il click e chiede l'indirizzo.
-    ORDINE CRUCIALE: PRIMA INVIA IL NUOVO, POI CANCELLA IL VECCHIO.
+    FORZA L'INVIO DI UN NUOVO MESSAGGIO PER EVITARE I BLOCCHI.
     """
     query = update.callback_query
-    await query.answer()
+    await query.answer() # Importante: ferma la rotellina
+    
+    print(f"DEBUG: Click Spedizione {query.data}")
     
     if "CMD_SHIP_" in query.data:
         ship_code = query.data.replace("CMD_SHIP_", "")
@@ -334,14 +333,14 @@ async def handle_shipping_selection(update: Update, context: ContextTypes.DEFAUL
     context.user_data['selected_shipping'] = ship_code
     context.user_data['step'] = 'address_input'
     
-    # 1. INVIA IL NUOVO MESSAGGIO (Così l'utente vede subito la richiesta)
+    # 1. INVIA NUOVO MESSAGGIO (Così appare sicuramente)
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
         text="📫 **DATI DI SPEDIZIONE**\n\nScrivi ora in chat il tuo indirizzo completo (Nome, Via, Città, CAP, Nazione).", 
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Indietro", callback_data="choose_shipping")]], parse_mode="Markdown")
     )
 
-    # 2. CANCELLA IL VECCHIO MESSAGGIO (Il menu di scelta)
+    # 2. CANCELLA IL MENU SPEDIZIONE (Pulizia)
     try: await query.message.delete()
     except: pass
 
@@ -376,10 +375,9 @@ async def show_payment_methods(update: Update, context: ContextTypes.DEFAULT_TYP
     ]
     
     if from_text:
-        # Se veniamo da input testuale, inviamo un nuovo messaggio
         await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     else: 
-        # Se veniamo da un bottone (es. Indietro), Invia Nuovo -> Cancella Vecchio
+        # Invia Nuovo -> Cancella Vecchio
         await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
         try: await update.callback_query.message.delete()
         except: pass
@@ -414,7 +412,6 @@ async def process_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("❌ Annulla Ordine", callback_data="main_menu")]
     ]
     
-    # Invia Nuovo -> Cancella Vecchio
     await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     try: await query.message.delete()
     except: pass
@@ -435,7 +432,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     step = context.user_data.get('step')
 
-    # CANCELLA IL MESSAGGIO DELL'UTENTE PER PULIZIA
+    # CANCELLA IL MESSAGGIO UTENTE (Come richiesto)
     try: await update.message.delete()
     except: pass
 
@@ -447,20 +444,19 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if qty <= 0: raise ValueError
             await execute_add_to_cart(update, context, prod_id, qty)
         except ValueError:
-            await update.message.reply_text("❌ Inserisci un numero valido.")
+            # Se errore, manda msg temporaneo
+            m = await update.message.reply_text("❌ Numero non valido.")
+            # Si potrebbe cancellare anche questo dopo tot secondi se si volesse
         return
 
     if step == 'address_input':
         if len(user_text) < 5: 
-            msg = await update.message.reply_text("⚠️ Indirizzo troppo corto.")
-            # Salva ID per cancellarlo dopo se vuoi, o lascialo
+            await update.message.reply_text("⚠️ Indirizzo troppo corto.")
             return
         
         context.user_data['shipping_address'] = user_text
         context.user_data['step'] = None 
         
-        # L'indirizzo è salvato e il messaggio utente cancellato (sopra).
-        # Ora mostriamo il riepilogo.
         await show_payment_methods(update, context, from_text=True)
         return
 
@@ -484,9 +480,10 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = update.callback_query.data
+    print(f"DEBUG CALLBACK: {data}")
     
     try:
-        # CATTURA UNIVERSALE SPEDIZIONE
+        # UNIVERSAL SHIP HANDLER
         if "ship" in data or "SHIP" in data:
             await handle_shipping_selection(update, context)
             return
