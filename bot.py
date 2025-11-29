@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # ==========================================
 
 TOKEN = os.getenv("BOT_TOKEN") 
-CONTACT_USERNAME = "tuo_username_qui" 
+CONTACT_USERNAME = "CHEFTONY_OG" 
 ADMIN_CHAT_ID = 123456789 
 
 WALLETS = {
