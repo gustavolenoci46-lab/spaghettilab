@@ -7,7 +7,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 # --- CONFIGURAZIONE ---
 TOKEN = os.getenv("BOT_TOKEN")
 # INSERISCI QUI IL TUO USERNAME TELEGRAM (senza @)
-CONTACT_USERNAME = "tuo_username_qui" 
+CONTACT_USERNAME = "CHEFTONY_OG" 
 
 # --- DATABASE PRODOTTI (Modifica qui i prodotti) ---
 PRODUCTS = {
