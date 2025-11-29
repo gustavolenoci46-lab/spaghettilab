@@ -143,9 +143,11 @@ def verify_tx_on_blockchain(crypto, txid, expected_amount, my_wallet_address):
     return False, "❌ TXID non valido."
 
 async def cleanup_messages(context, chat_id):
-    """Pulisce i messaggi temporanei salvati."""
-    # Aggiunto 'address_msg_id' alla lista di pulizia
-    for key in ['warning_msg_id', 'wallet_msg_id', 'address_msg_id']:
+    """
+    Cancella SOLO avvisi temporanei.
+    NON tocca menu o messaggi principali per evitare di rompere l'interfaccia.
+    """
+    for key in ['warning_msg_id', 'wallet_msg_id', 'address_req_id']:
         msg_id = context.user_data.get(key)
         if msg_id:
             try: await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
@@ -157,7 +159,7 @@ async def cleanup_messages(context, chat_id):
 # ==========================================
 
 async def safe_edit_or_send(update, context, text, reply_markup):
-    """Funzione intelligente che prova a modificare, se fallisce invia nuovo."""
+    """Prova a modificare, se fallisce invia nuovo."""
     try:
         if update.callback_query:
             await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode="Markdown")
@@ -299,10 +301,12 @@ async def empty_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- SPEDIZIONE ---
 
 async def choose_shipping(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mostra i metodi di spedizione."""
     query = update.callback_query; await query.answer()
     context.user_data['selected_shipping'] = None
     
     keyboard = []
+    # Usiamo "CMD_SHIP_"
     for code, method in SHIPPING_METHODS.items():
         keyboard.append([InlineKeyboardButton(f"{method['name']} (+{method['price']}€)", callback_data=f"CMD_SHIP_{code}")])
     
@@ -310,6 +314,10 @@ async def choose_shipping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_edit_or_send(update, context, "🚚 **Scegli Spedizione:**", InlineKeyboardMarkup(keyboard))
 
 async def handle_shipping_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Gestisce il click e chiede l'indirizzo.
+    USA SOLO edit_message_text PER GARANTIRE LA TRANSIZIONE SUL MESSAGGIO CORRENTE.
+    """
     query = update.callback_query
     await query.answer()
     
@@ -319,35 +327,35 @@ async def handle_shipping_selection(update: Update, context: ContextTypes.DEFAUL
         ship_code = query.data.split("_")[-1]
     
     if ship_code not in SHIPPING_METHODS:
-        await choose_shipping(update, context); return
+        await safe_edit_or_send(update, context, "⚠️ Errore Spedizione. Riprova.", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Indietro", callback_data="choose_shipping")]]))
+        return
 
     context.user_data['selected_shipping'] = ship_code
     context.user_data['step'] = 'address_input'
     
-    # INVIA IL NUOVO MESSAGGIO E SALVA IL SUO ID
-    msg = await context.bot.send_message(
-        chat_id=update.effective_chat.id,
+    # ⚠️ FIX: MODIFICA IL MESSAGGIO ESISTENTE (Non cancella nulla)
+    # Questo sblocca l'interfaccia perché aggiorna esattamente il menu che hai davanti.
+    await query.edit_message_text(
         text="📫 **DATI DI SPEDIZIONE**\n\nScrivi ora in chat il tuo indirizzo completo (Nome, Via, Città, CAP, Nazione).", 
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Indietro", callback_data="choose_shipping")]], parse_mode="Markdown")
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Indietro", callback_data="choose_shipping")]], parse_mode="Markdown"),
+        parse_mode="Markdown"
     )
-    context.user_data['address_msg_id'] = msg.message_id # Salviamo ID per cancellarlo dopo
-
-    # CANCELLA IL MENU SPEDIZIONE
-    try: await query.message.delete()
-    except: pass
+    
+    # Salviamo l'ID di questo messaggio per cancellarlo dopo
+    context.user_data['address_req_id'] = query.message.message_id
 
 # --- PAGAMENTO ---
 
 async def show_payment_methods(update: Update, context: ContextTypes.DEFAULT_TYPE, from_text=False):
     await cleanup_messages(context, update.effective_chat.id)
     
-    # Se il riepilogo viene da testo, pulisci anche la richiesta indirizzo "DATI SPEDIZIONE"
+    # SE VENIAMO DA TESTO, CANCELLA LA RICHIESTA INDIRIZZO "DATI SPEDIZIONE"
     if from_text:
-        addr_msg_id = context.user_data.get('address_msg_id')
-        if addr_msg_id:
-            try: await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=addr_msg_id)
+        addr_id = context.user_data.get('address_req_id')
+        if addr_id:
+            try: await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=addr_id)
             except: pass
-            context.user_data['address_msg_id'] = None
+            context.user_data['address_req_id'] = None
 
     ship_code = context.user_data.get('selected_shipping')
     
@@ -375,12 +383,8 @@ async def show_payment_methods(update: Update, context: ContextTypes.DEFAULT_TYP
         [InlineKeyboardButton("❌ Annulla Ordine", callback_data="main_menu")]
     ]
     
-    if from_text:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-    else: 
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-        try: await update.callback_query.message.delete()
-        except: pass
+    # Se da testo, manda nuovo. Se da click, modifica.
+    await safe_edit_or_send(update, context, text, InlineKeyboardMarkup(keyboard))
 
 async def process_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); await cleanup_messages(context, update.effective_chat.id)
@@ -412,11 +416,8 @@ async def process_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("❌ Annulla Ordine", callback_data="main_menu")]
     ]
     
-    if query.message:
-        try: await query.delete_message()
-        except: pass
-
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    # Qui il messaggio cambia drasticamente, usiamo safe send
+    await safe_edit_or_send(update, context, text, InlineKeyboardMarkup(keyboard))
 
 async def copy_address_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; crypto = query.data.replace("copy_", ""); wallet = WALLETS.get(crypto, "Errore")
@@ -434,7 +435,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     step = context.user_data.get('step')
 
-    # CANCELLA IL MESSAGGIO DELL'UTENTE (PULIZIA)
+    # 1. CANCELLA IL MESSAGGIO DELL'UTENTE (PULIZIA)
     try: await update.message.delete()
     except: pass
 
@@ -451,7 +452,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if step == 'address_input':
         if len(user_text) < 5: 
-            await update.message.reply_text("⚠️ Indirizzo troppo corto.")
+            # Qui si potrebbe mandare un avviso temporaneo
             return
         
         context.user_data['shipping_address'] = user_text
