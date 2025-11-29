@@ -6,7 +6,7 @@ import requests
 import logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# --- LOGGING PER DEBUG ---
+# --- LOGGING ---
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -28,7 +28,7 @@ WALLETS = {
 }
 
 # ==========================================
-# 📦 DATABASE PRODOTTI
+# 📦 PRODOTTI
 # ==========================================
 PRODUCTS = {
     "prod_1": {"name": "🍝 Spaghetti Amnesia", "price": 50, "unit": "g"},
@@ -143,7 +143,8 @@ def verify_tx_on_blockchain(crypto, txid, expected_amount, my_wallet_address):
     return False, "❌ TXID non valido."
 
 async def cleanup_messages(context, chat_id):
-    for key in ['warning_msg_id', 'wallet_msg_id']:
+    """Pulisce i messaggi temporanei salvati."""
+    for key in ['warning_msg_id', 'wallet_msg_id', 'menu_msg_id']:
         msg_id = context.user_data.get(key)
         if msg_id:
             try: await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
@@ -175,10 +176,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📣 POLICY", callback_data="policy"), InlineKeyboardButton("📞 Contacts", url=f"https://t.me/{CONTACT_USERNAME}")],
         [InlineKeyboardButton("🛒 Il mio Carrello", callback_data="show_cart")]
     ]
+    
     if update.callback_query: 
         await update.callback_query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     else: 
-        await update.message.reply_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        msg = await update.message.reply_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        context.user_data['menu_msg_id'] = msg.message_id
 
 async def listings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -264,7 +267,7 @@ async def execute_add_to_cart(update, context, prod_id, qty):
 
 async def show_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer()
-    context.user_data['selected_shipping'] = None
+    context.user_data['selected_shipping'] = None 
     cart = context.user_data.get('cart', {})
     
     if not cart: 
@@ -292,7 +295,7 @@ async def choose_shipping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['selected_shipping'] = None
     
     keyboard = []
-    # USO "ship_" classico MA IL ROUTER ORA LO CATTURA SICURAMENTE
+    # Usiamo "ship_" standard che il router intercetterà
     for code, method in SHIPPING_METHODS.items():
         keyboard.append([InlineKeyboardButton(f"{method['name']} (+{method['price']}€)", callback_data=f"ship_{code}")])
     
@@ -300,24 +303,37 @@ async def choose_shipping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text("🚚 **Scegli Spedizione:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def handle_shipping_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Gestisce il click Universale (vecchio o nuovo)"""
-    query = update.callback_query; await query.answer()
+    """
+    MODIFICATO: Usa 'delete_message' e 'send_message' per forzare l'aggiornamento
+    e prevenire il blocco dell'interfaccia.
+    """
+    query = update.callback_query
+    await query.answer() # Ferma la rotellina di caricamento
     
-    # ESTRAZIONE UNIVERSALE DEL CODICE SPEDIZIONE
-    # Prende l'ultimo pezzo della stringa (es. 'ship_std' -> 'std', 'CMD_SHIP_exp' -> 'exp')
+    # Estrae il codice in modo sicuro da "ship_xxx" o "CMD_SHIP_xxx"
     ship_code = query.data.split("_")[-1]
     
     if ship_code not in SHIPPING_METHODS:
-        await query.edit_message_text("⚠️ Errore. Riprova.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Indietro", callback_data="choose_shipping")]]))
-        return
+        # Se errore, rimanda al menu
+        return await choose_shipping(update, context)
 
     context.user_data['selected_shipping'] = ship_code
     context.user_data['step'] = 'address_input'
     
-    await query.edit_message_text(
-        "📫 **DATI DI SPEDIZIONE**\n\nScrivi ora in chat il tuo indirizzo completo (Nome, Via, Città, CAP).", 
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Indietro", callback_data="choose_shipping")]], parse_mode="Markdown")
+    # 1. CANCELLA IL VECCHIO MESSAGGIO (Il menu spedizione)
+    try:
+        await query.delete_message()
+    except:
+        pass # Se non riesce a cancellare, fa nulla
+
+    # 2. INVIA UN NUOVO MESSAGGIO PULITO (Richiesta Indirizzo)
+    msg = await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="📫 **DATI DI SPEDIZIONE**\n\nScrivi ora in chat il tuo indirizzo completo (Nome, Via, Città, CAP, Nazione).", 
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Indietro", callback_data="choose_shipping")]]),
+        parse_mode="Markdown"
     )
+    context.user_data['menu_msg_id'] = msg.message_id
 
 # --- PAGAMENTO ---
 
@@ -349,8 +365,15 @@ async def show_payment_methods(update: Update, context: ContextTypes.DEFAULT_TYP
         [InlineKeyboardButton("❌ Annulla Ordine", callback_data="main_menu")]
     ]
     
-    if from_text: await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-    else: await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    if from_text: 
+        msg = await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        context.user_data['menu_msg_id'] = msg.message_id
+    else: 
+        # Anche qui usiamo delete/send per evitare blocchi nel cambio sezione
+        try: await update.callback_query.delete_message()
+        except: pass
+        msg = await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        context.user_data['menu_msg_id'] = msg.message_id
 
 async def process_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); await cleanup_messages(context, update.effective_chat.id)
@@ -359,10 +382,11 @@ async def process_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     address = context.user_data.get('shipping_address')
     recap_products = get_order_recap(context)
 
-    await query.edit_message_text(f"🔄 Calcolo cambio {crypto}...")
+    msg = await context.bot.send_message(chat_id=update.effective_chat.id, text=f"🔄 Calcolo cambio {crypto}...", parse_mode="Markdown")
     amount = get_crypto_price(crypto, eur)
+    await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=msg.message_id) # Cancella caricamento
+
     wallet = WALLETS.get(crypto, "Errore")
-    
     context.user_data['pending_order'] = {"crypto": crypto, "amount": amount, "wallet": wallet, "eur": eur}
     context.user_data['step'] = 'txid_input'
 
@@ -380,13 +404,21 @@ async def process_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔙 Cambia Metodo", callback_data="to_pay_methods")],
         [InlineKeyboardButton("❌ Annulla Ordine", callback_data="main_menu")]
     ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    
+    # Cancelliamo il menu precedente per pulizia
+    if query.message:
+        try: await query.delete_message()
+        except: pass
+
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def copy_address_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; crypto = query.data.replace("copy_", ""); wallet = WALLETS.get(crypto, "Errore")
+    
     wallet_msg = await context.bot.send_message(chat_id=update.effective_chat.id, text=f"`{wallet}`", parse_mode="Markdown")
     context.user_data['wallet_msg_id'] = wallet_msg.message_id
-    warn_msg = await context.bot.send_message(chat_id=update.effective_chat.id, text="⏳ **ATTESA...** Incolla qui sotto il **TXID**.", parse_mode="Markdown")
+    
+    warn_msg = await context.bot.send_message(chat_id=update.effective_chat.id, text="⏳ **IN ATTESA...** Incolla qui sotto il **TXID**.", parse_mode="Markdown")
     context.user_data['warning_msg_id'] = warn_msg.message_id
     await query.answer("Copiato!")
 
@@ -439,9 +471,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cleanup_messages(context, update.effective_chat.id)
     
     try:
-        # !!! FIX UNIVERSALE: CATTURA QUALSIASI COSA CON "ship" NEL NOME !!!
-        # Questo intercetta sia i vecchi "ship_std" che eventuali "CMD_SHIP_std"
-        if "ship_" in data or "SHIP_" in data:
+        # CATTURA UNIVERSALE SPEDIZIONE: se contiene "ship" o "SHIP", gestiscilo
+        if "ship" in data or "SHIP" in data:
             await handle_shipping_selection(update, context)
             return
 
